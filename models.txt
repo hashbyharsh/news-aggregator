@@ -1,0 +1,497 @@
+#  ========================
+#  GPT-5 Nano PROCESSING
+#  ========================
+    
+async def process_article_group(self, db: Session, group_id: str, group: List[Article]) -> None:
+    """Process a group of similar articles using GPT-5 Nano"""
+    if not group:
+        return
+    
+    logger.info(f"Processing group {group_id} with {len(group)} articles.")
+    
+    try:
+        # Combine article content for the prompt
+            combined_content = "\n\n".join([
+            f"Source: {article.source_url}\nTitle: {article.title}\nContent: {article.content[:500] + '...' if len(article.content) > 500 else article.content}"
+            for article in group
+        ])
+
+        # Check if group has been processed (using Redis cache)
+        # group_key = hashlib.sha256(combined_content.encode()).hexdigest()
+        # if self.redis.hexists("processed_articles", group_key):
+        #   logger.info(f"Skipping already processed group {group_id}")
+        #   for article in group:
+        #     article.processed = True
+        #     article.processed_at = datetime.now()
+        #     article.group_id = group_id
+        # db.commit()
+        # return
+        
+        # Updated prompt (unchanged, as it’s compatible with GPT-5 Nano)
+        prompt = f"""You are a professional journalist and automotive expert. Your task is to merge and rewrite the following multiple versions of an article into a single, polished, publication-ready article in the specified format.
+
+        ### Requirements:
+        - **Headline**: One-line headline (max 300 characters) in this format: "Company X launches Product Y in India at INR Z lakhs" or similar, including key details (brand, action, price/date/numbers), using present tense, professional style (e.g., "Tata Motors launches Nexon EV Max in India at INR 17.74 lakhs ex-showroom").
+        - **Subheadline**: Optional, 1–2 sentences (max 500 characters). Include only if it adds unique, non-repetitive details (e.g., additional specs, context, or outcomes not in the headline) in the same professional style (e.g., "The Nexon EV Max offers a 400 km range and advanced safety features.").
+        - **Accuracy**: Verify facts across sources, resolve contradictions, ensure consistency.
+        - **Impartiality**: Maintain a neutral, balanced, nonpartisan tone — avoid bias or opinions.
+        - **Completeness**: Include full context, background, and key details in the article.
+        - **Originality**: Write in your own words; no plagiarism or copy-paste. Add clear explanations or analysis where helpful.
+        - **Professional Writing**: Use engaging, concise, clear language. Structure with introduction, body, conclusion.
+        - **Style**: Follow reputable news outlets (e.g., Reuters, BBC, AP). Avoid fluff, jargon, sensationalism.
+        - **Length**: Article body between 2,000 and 5,000 characters (roughly 300–800 words).
+        - **Metadata**: Extract car brand (e.g., "Tata", "Hyundai") and model name (e.g., "Nexon", "Creta") or null if not found.
+        - **Formatting**: Use the exact structure below, with section titles (Headline, Subheadline, Article, MetaData) and no '#' symbols in the output. Ensure proper spacing and newlines as shown.
+
+        ### Output Format (Plain Text):
+        [Generated headline (max 300 chars)]
+
+        [Optional 1–2 sentence Subheadline (max 500 chars, non-repetitive, specific details if present, empty string if omitted)]
+
+        [Article (max 2,000 - 3,000 chars, well-structured with paragraphs)]
+
+        - Car Brand: [Car brand or null]
+        - Model Name: [Car model or null]
+
+        ### Source Versions:
+        {combined_content}
+        """
+
+            # Use OpenAI API for GPT-5 Nano
+            async with ClientSession() as session:
+                response = await session.post(
+                "https://api.openai.com/v1/chat/completions",
+                json={
+                    "model": "gpt-5-nano-2025-08-07",
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "You are a professional journalist and automotive expert. Respond with plain text in the exact format specified."
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                    "temperature": 0.3,
+                    "max_tokens": 4096,  # Adjust based on GPT-5 Nano's limits
+                    "reasoning_effort": "minimal"  # Optimize for speed, suitable for news processing[](https://replicate.com/openai/gpt-5-nano)
+                },
+                headers={
+                    "Authorization": f"Bearer {config.OPENAI_API_KEY}",
+                    "Content-Type": "application/json"
+                }
+            )
+            
+            # Check for HTTP errors
+            if response.status != 200:
+                error_content = await response.text()
+                logger.error(f"OpenAI API error: {response.status} - {error_content}")
+                raise HTTPException(status_code=response.status, detail=error_content)
+            
+            response_data = await response.json()
+            ai_response = response_data["choices"][0]["message"]["content"]
+            
+            # Parse response (expecting plain text in article format)
+            try:
+                lines = ai_response.splitlines()
+                processed_content = ai_response
+                brand_name = None
+                model_name = None
+                
+                # Extract brand and model from MetaData section
+                for i, line in enumerate(lines):
+                    if line.startswith("- Car Brand:"):
+                        brand_name = line.replace("- Car Brand: ", "").strip() or None
+                    elif line.startswith("- Model Name:"):
+                        model_name = line.replace("- Model Name: ", "").strip() or None
+            except Exception as e:
+                logger.warning(f"Failed to parse response for group {group_id}, using fallback extraction: {e}")
+                processed_content = ai_response[:65535]  # Truncate to max length
+                full_text = f"{group[0].title} {group[0].content}"
+                brand_name, model_name = self.extract_car_brand_model(full_text)
+            
+            # Truncate if too long for database
+            MAX_CONTENT_LENGTH = 65535
+            if len(processed_content) > MAX_CONTENT_LENGTH:
+                processed_content = processed_content[:MAX_CONTENT_LENGTH-3] + "..."
+                logger.warning(f"Truncated processed_content for group {group_id}")
+            
+            # Update primary article
+            primary_article = group[0]
+            primary_article.processed_content = processed_content
+            primary_article.brand_name = brand_name
+            primary_article.model_name = model_name
+            primary_article.processed = True
+            primary_article.processed_at = datetime.now()
+            primary_article.group_id = group_id
+            
+            # Update secondary articles
+            for i in range(1, len(group)):
+                group[i].processed = True
+                group[i].processed_at = datetime.now()
+                group[i].group_id = group_id
+                group[i].brand_name = brand_name
+                group[i].model_name = model_name
+
+            # Cache in Redis
+            # self.redis.hset("processed_articles", group_key, "processed")
+            # self.redis.expire("processed_articles", 86400)
+            
+            db.commit()
+            logger.info(f"Successfully processed group {group_id} - Brand: {brand_name}, Model: {model_name}")
+            
+    except Exception as error:
+        logger.error(f"Error processing group {group_id}: {error}")
+        
+        # Fallback processing
+        for article in group:
+            if not article.brand_name or not article.model_name:
+                full_text = f"{article.title} {article.content}"
+                brand_name, model_name = self.extract_car_brand_model(full_text)
+                article.brand_name = brand_name
+                article.model_name = model_name
+            
+            article.processed = True
+            article.processed_at = datetime.now()
+            article.group_id = group_id
+
+        # self.redis.hset("processed_articles", group_key, "processed")
+        # self.redis.expire("processed_articles", 86400)
+        
+        db.commit()
+
+
+#  ========================
+#  gpt-4o-mini PROCESSING
+#  ========================
+    
+    async def process_article_group(self, db: Session, group_id: str, group: List[Article]) -> None:
+        """Process a group of similar articles using OpenAI GPT-4o-mini"""
+        if not group:
+            return
+    
+        logger.info(f"Processing group {group_id} with {len(group)} articles.")
+    
+        try:
+            combined_content = "\n\n".join([
+            f"Source: {article.source_url}\nTitle: {article.title}\nContent: {article.content[:500] + '...' if len(article.content) > 500 else article.content}"
+            for article in group
+        ])
+
+            group_key = hashlib.sha256(combined_content.encode()).hexdigest()
+            if self.redis.hexists("processed_articles", group_key):
+                logger.info(f"Skipping already processed group {group_id}")
+                for article in group:
+                    article.processed = True
+                    article.processed_at = datetime.now()
+                    article.group_id = group_id
+                    db.commit()
+                    return
+        
+            # Updated prompt to generate article format without '#'
+            prompt = f"""You are a professional journalist and automotive expert. Your task is to merge and rewrite the following multiple versions of an article into a single, polished, publication-ready article in the specified format.
+
+        ### Requirements:
+        - **Headline**: One-line headline (max 300 characters) in this format: "Company X launches Product Y in India at INR Z lakhs" or similar, including key details (brand, action, price/date/numbers), using present tense, professional style (e.g., "Tata Motors launches Nexon EV Max in India at INR 17.74 lakhs ex-showroom").
+        - **Subheadline**: Optional, 1–2 sentences (max 500 characters). Include only if it adds unique, non-repetitive details (e.g., additional specs, context, or outcomes not in the headline) in the same professional style (e.g., "The Nexon EV Max offers a 400 km range and advanced safety features.").
+        - **Accuracy**: Verify facts across sources, resolve contradictions, ensure consistency.
+        - **Impartiality**: Maintain a neutral, balanced, nonpartisan tone — avoid bias or opinions.
+        - **Completeness**: Include full context, background, and key details in the article.
+        - **Originality**: Write in your own words; no plagiarism or copy-paste. Add clear explanations or analysis where helpful.
+        - **Professional Writing**: Use engaging, concise, clear language. Structure with introduction, body, conclusion.
+        - **Style**: Follow reputable news outlets (e.g., Reuters, BBC, AP). Avoid fluff, jargon, sensationalism.
+        - **Length**: Article body between 2,000 and 5,000 characters (roughly 300–800 words).
+        - **Metadata**: Extract car brand (e.g., "Tata", "Hyundai") and model name (e.g., "Nexon", "Creta") or null if not found.
+        - **Formatting**: Use the exact structure below, with section titles (Headline, Subheadline, Article, MetaData) and no '#' symbols in the output. Ensure proper spacing and newlines as shown.
+
+        ### Output Format (Plain Text):
+        [Generated headline (max 300 chars)]
+
+        [Optional 1–2 sentence Subheadline (max 500 chars, non-repetitive, specific details if present, empty string if omitted)]
+
+        [Article (max 2,000 - 3,000 chars, well-structured with paragraphs)]
+
+        - Car Brand: [Car brand or null]
+        - Model Name: [Car model or null]
+
+        ### Source Versions:
+        {combined_content}
+        """
+
+        # Updated API call for OpenAI GPT-4o-mini
+            response = await self.client.post(
+            "https://api.openai.com/v1/chat/completions",
+            json={
+                "model": "gpt-4o-mini",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a professional journalist and automotive expert. Respond with plain text in the exact format specified."
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                "temperature": 0.3,
+                "max_tokens": 4000
+            },
+            headers={
+                "Authorization": f"Bearer {config.OPENAI_API_KEY}",  # Note: Changed from GROQ_API_KEY
+                "Content-Type": "application/json"
+            }
+        )
+        
+            response.raise_for_status()
+            ai_response = response.json()["choices"][0]["message"]["content"]
+        
+        # Parse response (expecting plain text in article format)
+            try:
+                lines = ai_response.splitlines()
+                processed_content = ai_response
+                brand_name = None
+                model_name = None
+            
+            # Extract brand and model from MetaData section
+                for i, line in enumerate(lines):
+                    if line.startswith("- Car Brand:"):
+                        brand_name = line.replace("- Car Brand: ", "").strip() or None
+                    elif line.startswith("- Model Name:"):
+                        model_name = line.replace("- Model Name: ", "").strip() or None
+            except Exception as e:
+                logger.warning(f"Failed to parse response for group {group_id}, using fallback extraction: {e}")
+                processed_content = ai_response[:65535]  # Truncate to max length
+                full_text = f"{group[0].title} {group[0].content}"
+                brand_name, model_name = self.extract_car_brand_model(full_text)
+        
+        # Truncate if too long for database
+            MAX_CONTENT_LENGTH = 65535
+            if len(processed_content) > MAX_CONTENT_LENGTH:
+                processed_content = processed_content[:MAX_CONTENT_LENGTH-3] + "..."
+                logger.warning(f"Truncated processed_content for group {group_id}")
+        
+        # Update  primary article
+            primary_article = group[0]
+            primary_article.processed_content = processed_content
+            primary_article.brand_name = brand_name
+            primary_article.model_name = model_name
+            primary_article.processed = True
+            primary_article.processed_at = datetime.now()
+            primary_article.group_id = group_id
+        
+            for i in range(1, len(group)):
+                group[i].processed = True
+                group[i].processed_at = datetime.now()
+                group[i].group_id = group_id
+                group[i].brand_name = brand_name
+                group[i].model_name = model_name
+
+            self.redis.hset("processed_articles", group_key, "processed")
+            self.redis.expire("processed_articles", 3600)
+        
+            db.commit()
+            logger.info(f"Successfully processed group {group_id} - Brand: {brand_name}, Model: {model_name}")
+        
+        except Exception as error:
+            logger.error(f"Error processing group {group_id}: {error}")
+        
+        for article in group:
+            if not article.brand_name or not article.model_name:
+                full_text = f"{article.title} {article.content}"
+                brand_name, model_name = self.extract_car_brand_model(full_text)
+                article.brand_name = brand_name
+                article.model_name = model_name
+            
+            article.processed = True
+            article.processed_at = datetime.now()
+            article.group_id = group_id
+
+        self.redis.hset("processed_articles", group_key, "processed")
+        self.redis.expire("processed_articles", 3600)
+        
+        db.commit()
+
+#  ========================
+#  gpt-4.1-mini PROCESSING
+#  ========================
+
+async def process_article_group(self, db: Session, group_id: str, group: List[Article]) -> None:
+    """Process a group of similar articles using GPT-4.1 Mini"""
+    if not group:
+        return
+    
+    logger.info(f"Processing group {group_id} with {len(group)} articles.")
+    
+    try:
+        # Combine article content for the prompt
+        combined_content = "\n\n".join([
+            f"Source: {article.source_url}\nTitle: {article.title}\nContent: {article.content[:500] + '...' if len(article.content) > 500 else article.content}"
+            for article in group
+        ])
+
+        # Check Redis cache
+        group_key = hashlib.sha256(combined_content.encode()).hexdigest()
+        if self.redis.hexists("processed_articles", group_key):
+            logger.info(f"Skipping already processed group {group_id}")
+            for article in group:
+                article.processed = True
+                article.processed_at = datetime.now()
+                article.group_id = group_id
+            db.commit()
+            return
+        
+        # Prompt (optimized for GPT-4.1 Mini)
+        prompt = f"""You are a professional journalist and automotive expert. Your task is to merge and rewrite the following multiple versions of an article into a single, polished, publication-ready article in the specified format.
+
+        ### Requirements:
+        - **Headline**: One-line headline (max 300 characters) in this format: "Company X launches Product Y in India at INR Z lakhs" or similar, including key details (brand, action, price/date/numbers), using present tense, professional style (e.g., "Tata Motors launches Nexon EV Max in India at INR 17.74 lakhs ex-showroom").
+        - **Subheadline**: Optional, 1–2 sentences (max 500 characters). Include only if it adds unique, non-repetitive details (e.g., additional specs, context, or outcomes not in the headline) in the same professional style (e.g., "The Nexon EV Max offers a 400 km range and advanced safety features.").
+        - **Accuracy**: Verify facts across sources, resolve contradictions (use the most recent or frequently cited value, note discrepancies in the article).
+        - **Impartiality**: Maintain a neutral, balanced, nonpartisan tone — avoid bias or opinions.
+        - **Completeness**: Include full context, background, and key details in the article.
+        - **Originality**: Write in your own words; no plagiarism or copy-paste. Add clear explanations or analysis where helpful.
+        - **Professional Writing**: Use engaging, concise, clear language. Structure with introduction, body, conclusion.
+        - **Style**: Follow reputable news outlets (e.g., Reuters, BBC, AP). Avoid fluff, jargon, sensationalism.
+        - **Length**: Article body between 2,000 and 5,000 characters (roughly 300–800 words).
+        - **Metadata**: Extract car brand (e.g., "Tata", "Hyundai") and model name (e.g., "Nexon", "Creta") or null if not found.
+        - **Formatting**: Use the exact structure below, with section titles (Headline, Subheadline, Article, MetaData) and no '#' symbols in the output. Ensure proper spacing and newlines as shown.
+        - **Robustness**: Ignore irrelevant content (e.g., ads, navigation links). Focus on automotive details (e.g., car specs, prices, launch dates).
+
+        ### Output Format (Plain Text):
+        [Generated headline (max 300 chars)]
+
+        [Optional 1–2 sentence Subheadline (max 500 chars, non-repetitive, specific details if present, empty string if omitted)]
+
+        [Article (2,000–5,000 chars, well-structured with paragraphs)]
+
+        - Car Brand: [Car brand or null]
+        - Model Name: [Car model or null]
+
+        ### Source Versions:
+        {combined_content}
+
+        Return only the specified plain text format with no extra text, comments, or symbols.
+        """
+
+        # API call with retry logic
+        max_retries = 3
+        attempt = 0
+        while attempt < max_retries:
+            try:
+                async with ClientSession() as session:
+                    response = await session.post(
+                        "https://api.openai.com/v1/chat/completions",
+                        json={
+                            "model": "gpt-4.1-mini",
+                            "messages": [
+                                {
+                                    "role": "system",
+                                    "content": "You are a professional journalist and automotive expert. Respond with plain text in the exact format specified."
+                                },
+                                {
+                                    "role": "user",
+                                    "content": prompt
+                                }
+                            ],
+                            "temperature": 0.3,
+                            "max_tokens": 4096
+                        },
+                        headers={
+                            "Authorization": f"Bearer {config.OPENAI_API_KEY}",
+                            "Content-Type": "application/json"
+                        }
+                    )
+                    
+                    response.raise_for_status()
+                    response_data = await response.json()
+                    ai_response = response_data["choices"][0]["message"]["content"]
+                    
+                    # Log token usage
+                    tokens_used = response_data.get("usage", {}).get("total_tokens", 0)
+                    logger.info(f"Tokens used for group {group_id}: {tokens_used}")
+                    break
+                
+            except HTTPException as e:
+                if e.status_code == 429:
+                    attempt += 1
+                    wait_time = 2 ** attempt
+                    logger.warning(f"Rate limit hit, retrying in {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    logger.error(f"OpenAI API error: {e.status_code} - {await e.detail()}")
+                    raise
+            except Exception as e:
+                logger.error(f"Unexpected error in API call: {str(e)}", exc_info=True)
+                raise
+            
+            if attempt == max_retries:
+                logger.error(f"Max retries reached for GPT-4.1 Mini on group {group_id}")
+                raise HTTPException(status_code=429, detail="Rate limit exceeded")
+        
+        # Parse response
+        try:
+            lines = ai_response.splitlines()
+            processed_content = ai_response
+            brand_name = None
+            model_name = None
+            
+            for i, line in enumerate(lines):
+                if line.startswith("- Car Brand:"):
+                    brand_name = line.replace("- Car Brand: ", "").strip() or None
+                elif line.startswith("- Model Name:"):
+                    model_name = line.replace("- Model Name: ", "").strip() or None
+        except Exception as e:
+            logger.warning(f"Failed to parse response for group {group_id}, using fallback extraction: {e}")
+            processed_content = ai_response[:65535]
+            full_text = f"{group[0].title} {group[0].content}"
+            brand_name, model_name = self.extract_car_brand_model(full_text)
+        
+        # Truncate for database
+        MAX_CONTENT_LENGTH = 65535
+        if len(processed_content) > MAX_CONTENT_LENGTH:
+            processed_content = processed_content[:MAX_CONTENT_LENGTH-3] + "..."
+            logger.warning(f"Truncated processed_content for group {group_id}")
+        
+        # Update primary article
+        primary_article = group[0]
+        primary_article.processed_content = processed_content
+        primary_article.brand_name = brand_name
+        primary_article.model_name = model_name
+        primary_article.processed = True
+        primary_article.processed_at = datetime.now()
+        primary_article.group_id = group_id
+        
+        # Update secondary articles
+        for i in range(1, len(group)):
+            group[i].processed = True
+            group[i].processed_at = datetime.now()
+            group[i].group_id = group_id
+            group[i].brand_name = brand_name
+            group[i].model_name = model_name
+
+        # Cache in Redis
+        self.redis.hset("processed_articles", group_key, "processed")
+        self.redis.expire("processed_articles", 86400)
+        
+        db.commit()
+        logger.info(f"Successfully processed group {group_id} - Brand: {brand_name}, Model: {model_name}")
+        
+    except Exception as error:
+        logger.error(f"Error processing group {group_id}: {error}")
+        
+        for article in group:
+            if not article.brand_name or not article.model_name:
+                full_text = f"{article.title} {article.content}"
+                brand_name, model_name = self.extract_car_brand_model(full_text)
+                article.brand_name = brand_name
+                article.model_name = model_name
+            
+            article.processed = True
+            article.processed_at = datetime.now()
+            article.group_id = group_id
+
+        self.redis.hset("processed_articles", group_key, "processed")
+        self.redis.expire("processed_articles", 86400)
+        
+        db.commit()
