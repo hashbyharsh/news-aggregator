@@ -1,7 +1,7 @@
 ARTICLE_SUMMARY_PROMPT = """
 Analyze the following article versions and provide a JSON response with exactly these fields:
 
-1. "summary": A single, concise one-line news summary (max 300 characters)
+1. "summary": A single, concise one-line news summary (max 200-300 characters)
 2. "brand_name": The car brand mentioned (e.g., "Tata", "Maruti", "Hyundai") or null if not found
 3. "model_name": The specific car model mentioned (e.g., "Nexon", "Swift", "Creta") or null if not found
 
