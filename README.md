@@ -1,11 +1,11 @@
 # Automotive News Aggregator
 
-This project is a FastAPI-based service that scrapes automotive news articles from multiple sources, groups similar articles, and merges them into a single, polished, publication-ready article using OpenAI's GPT-4.1 Mini model. The output includes a headline (max 300 chars), optional subheadline (max 500 chars), article body (2,000–5,000 chars), and metadata (car brand/model). The service runs on a cron schedule (every 30 minutes) and uses a SQL database for storage and Redis for caching.
+This project is a FastAPI-based service that scrapes automotive news from multiple sources, groups similar news, and merges them into a single, polished, publication-ready news using OpenAI's GPT-4.1 Mini model. The output includes a headline (max 300 chars), optional subheadline (max 500 chars), news body (2,000–5,000 chars), and metadata (car brand/model). The service runs on a cron schedule (every 30 minutes) and uses a SQL database for storage and Redis for caching.
 
 ## Features
 - **Web Scraping**: Scrapes automotive news from sources like `auto.economictimes.indiatimes.com`, `autocarindia.com`, and `rushlane.com` using Playwright.
 - **News Grouping**: Clusters similar news based on content similarity.
-- **AI Processing**: Merges news into a polished output using Groq Llama-3.3-70B-Versatile, with structured format (headline, subheadline, article, metadata).
+- **AI Processing**: Merges news into a polished output using Groq Llama-3.3-70B-Versatile, with structured format (headline, subheadline, news, metadata).
 - **Async Workflow**: Built with FastAPI for efficient, asynchronous processing.
 - **Persistence**: Stores news and metadata in a SQL database (via SQLAlchemy) and caches processed groups in Redis.
 - **Scheduling**: Runs scraping and processing every 30 minutes using APScheduler.
