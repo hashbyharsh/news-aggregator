@@ -641,7 +641,7 @@ class NewsService:
             
             logger.debug(f"Group {group_id} has {len(group)} articles from {len(unique_sources)} sources: {list(unique_sources)}")
             
-            if len(unique_sources) >= 1:
+            if len(unique_sources) >= 2:
                 representative = max(group, key=lambda x: len(x.get("content", "")), default=group[0])
                 
                 existing = db.query(Article).filter(
@@ -872,4 +872,5 @@ class NewsService:
             self.redis.expire("processed_articles", 3600)
             
             db.commit()
+
         
